@@ -1,2 +1,2 @@
-# Go Race Detector
-Go Race Detector Based on Golang SSA
+# Go Concurrency Bug Detector
+Go Concurrency Bug Detector Based on Golang SSA

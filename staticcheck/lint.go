@@ -22,6 +22,7 @@ import (
 	"github.com/Tengfei1010/GCBDetector/lint"
 	. "github.com/Tengfei1010/GCBDetector/lint/lintdsl"
 	"github.com/Tengfei1010/GCBDetector/ssa"
+	"github.com/deckarep/golang-set"
 
 	"golang.org/x/tools/go/loader"
 )
@@ -52,6 +53,8 @@ func (c *Checker) Funcs() map[string]lint.Func {
 		"SA2001": c.CheckEmptyCriticalSection,
 		"SA2002": c.CheckConcurrentTesting,
 		"SA2003": c.CheckDeferLock,
+		"SA2004": c.CheckUnlockAfterLock,
+		"SA2005": c.CheckDoubleLock,
 	}
 }
 
@@ -364,7 +367,6 @@ func hasSideEffects(node ast.Node) bool {
 	return dynamic
 }
 
-
 func unwrapFunction(val ssa.Value) *ssa.Function {
 	switch val := val.(type) {
 	case *ssa.Function:
@@ -434,6 +436,28 @@ func buildTagsIdentical(s1, s2 []string) bool {
 		}
 	}
 	return true
+}
+
+func isCallToLock(callCommon *ssa.CallCommon) bool {
+
+	if IsCallTo(callCommon, "(*sync.Mutex).Lock") ||
+		IsCallTo(callCommon, "(*sync.RWMutex).RLock") ||
+		IsCallTo(callCommon, "(*sync.RWMutex).Lock") {
+			return true
+	}
+
+	return false
+}
+
+func  isCallToUnlock(callCommon *ssa.CallCommon) bool {
+	if IsCallTo(callCommon, "(*sync.Mutex).Unlock") ||
+		IsCallTo(callCommon, "(*sync.RWMutex).RUnlock") ||
+		IsCallTo(callCommon, "(*sync.RWMutex).UnLock") {
+		return true
+	}
+
+	return false
+
 }
 
 func (c *Checker) CheckWaitgroupAdd(j *lint.Job) {
@@ -600,6 +624,7 @@ func (c *Checker) CheckConcurrentTesting(j *lint.Job) {
 }
 
 func (c *Checker) CheckDeferLock(j *lint.Job) {
+
 	for _, ssafn := range j.Program.InitialFunctions {
 		for _, block := range ssafn.Blocks {
 			instrs := FilterDebug(block.Instrs)
@@ -611,14 +636,15 @@ func (c *Checker) CheckDeferLock(j *lint.Job) {
 				if !ok {
 					continue
 				}
-				if !IsCallTo(call.Common(), "(*sync.Mutex).Lock") && !IsCallTo(call.Common(), "(*sync.RWMutex).RLock") {
+				if !isCallToLock(call.Common()) {
 					continue
 				}
+
 				nins, ok := instrs[i+1].(*ssa.Defer)
 				if !ok {
 					continue
 				}
-				if !IsCallTo(&nins.Call, "(*sync.Mutex).Lock") && !IsCallTo(&nins.Call, "(*sync.RWMutex).RLock") {
+				if !isCallToLock(nins.Common()) {
 					continue
 				}
 				if call.Common().Args[0] != nins.Call.Args[0] {
@@ -633,6 +659,89 @@ func (c *Checker) CheckDeferLock(j *lint.Job) {
 					alt = "RUnlock"
 				}
 				j.Errorf(nins, "deferring %s right after having locked already; did you mean to defer %s?", name, alt)
+			}
+		}
+	}
+}
+
+func (c *Checker) CheckUnlockAfterLock(j *lint.Job) {
+
+	for _, ssafn := range j.Program.InitialFunctions {
+		for _, block := range ssafn.Blocks {
+
+			instrs := FilterDebug(block.Instrs)
+
+			if len(instrs) < 2 {
+				continue
+			}
+
+			for i, ins := range instrs[:len(instrs)-1] {
+				call, ok := ins.(*ssa.Call)
+				if !ok {
+					continue
+				}
+				if !isCallToLock(call.Common()) {
+					continue
+				}
+				nins, ok := instrs[i+1].(*ssa.Call)
+				if !ok {
+					continue
+				}
+				if !isCallToUnlock(nins.Common()) {
+					continue
+				}
+				if call.Common().Args[0] != nins.Call.Args[0] {
+					continue
+				}
+				name := shortCallName(call.Common())
+				alt := ""
+				switch name {
+				case "Lock":
+					alt = "Unlock"
+				case "RLock":
+					alt = "RUnlock"
+				}
+				j.Errorf(nins, "Unlock %s right after locking; did you mean to defer %s?", name, alt)
+			}
+		}
+	}
+}
+
+func (c *Checker) CheckDoubleLock(j *lint.Job) {
+
+	for _, ssafn := range j.Program.InitialFunctions {
+		lockSet := mapset.NewSet()
+		for _, block := range ssafn.Blocks {
+			instrs := FilterDebug(block.Instrs)
+
+			if len(instrs) < 2 {
+				continue
+			}
+
+			for _, ins := range instrs[:len(instrs)-1] {
+
+				call, ok := ins.(*ssa.Call)
+
+				if !ok {
+					continue
+				}
+
+				if isCallToLock(call.Common()) {
+					// if call is lock, save to the set; else if call is unlock remove the lock from the set
+					ok = lockSet.Add(call.Common().Args[0])
+					if !ok {
+						// add error, it has already acquired the lock
+						// TODO: update error message
+						name := shortCallName(call.Common())
+						j.Errorf(call, "Acquiring %s right after having locked already", name)
+					}
+				} else if isCallToUnlock(call.Common()) {
+
+					lockSet.Remove(call.Common().Args[0])
+
+				} else {
+					continue
+				}
 			}
 		}
 	}

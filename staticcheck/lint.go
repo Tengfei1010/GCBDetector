@@ -22,9 +22,8 @@ import (
 	"github.com/Tengfei1010/GCBDetector/lint"
 	. "github.com/Tengfei1010/GCBDetector/lint/lintdsl"
 	"github.com/Tengfei1010/GCBDetector/ssa"
-	"github.com/deckarep/golang-set"
-
 	"golang.org/x/tools/go/loader"
+	"github.com/Tengfei1010/GCBDetector/staticcheck/util"
 )
 
 type runeSlice []rune
@@ -443,13 +442,13 @@ func isCallToLock(callCommon *ssa.CallCommon) bool {
 	if IsCallTo(callCommon, "(*sync.Mutex).Lock") ||
 		IsCallTo(callCommon, "(*sync.RWMutex).RLock") ||
 		IsCallTo(callCommon, "(*sync.RWMutex).Lock") {
-			return true
+		return true
 	}
 
 	return false
 }
 
-func  isCallToUnlock(callCommon *ssa.CallCommon) bool {
+func isCallToUnlock(callCommon *ssa.CallCommon) bool {
 	if IsCallTo(callCommon, "(*sync.Mutex).Unlock") ||
 		IsCallTo(callCommon, "(*sync.RWMutex).RUnlock") ||
 		IsCallTo(callCommon, "(*sync.RWMutex).UnLock") {
@@ -457,6 +456,74 @@ func  isCallToUnlock(callCommon *ssa.CallCommon) bool {
 	}
 
 	return false
+
+}
+
+type InstrInterface interface {
+	ssa.Instruction
+}
+
+
+func isLockToLock(lockCall *ssa.Call, currentBlock *ssa.BasicBlock) ssa.Instruction {
+
+	// TODO: current method is not suitable for following case.
+	/*
+		There is a double lock in function f2.
+
+		func f1 () {
+			....
+			r.Lock()
+		}
+
+		func f2() {
+			...
+			r.Lock()
+			f1()
+		}
+
+	 */
+
+	for _, ins := range currentBlock.Instrs {
+
+		call, ok := ins.(*ssa.Call)
+
+		if !ok {
+			continue
+		}
+
+		if call == lockCall {
+			continue
+		}
+
+		if isCallToUnlock(call.Common()) && call.Common().Args[0] == lockCall.Common().Args[0] {
+			return nil
+		}
+
+		if !isCallToLock(call.Common()) {
+			continue
+		}
+
+		if call.Common().Args[0] == lockCall.Common().Args[0] {
+
+			if util.InstrDominas(lockCall, call){
+				return ins
+			}
+		}
+	}
+
+
+	for _, sBlock := range currentBlock.Dominees() {
+		
+		if sBlock == currentBlock {
+			continue
+		}
+		
+		if len(sBlock.Dominees()) > 0 {
+			return isLockToLock(lockCall, sBlock)
+		}
+	}
+
+	return nil
 
 }
 
@@ -710,7 +777,6 @@ func (c *Checker) CheckUnlockAfterLock(j *lint.Job) {
 func (c *Checker) CheckDoubleLock(j *lint.Job) {
 
 	for _, ssafn := range j.Program.InitialFunctions {
-		lockSet := mapset.NewSet()
 		for _, block := range ssafn.Blocks {
 			instrs := FilterDebug(block.Instrs)
 
@@ -727,20 +793,18 @@ func (c *Checker) CheckDoubleLock(j *lint.Job) {
 				}
 
 				if isCallToLock(call.Common()) {
-					// if call is lock, save to the set; else if call is unlock remove the lock from the set
-					ok = lockSet.Add(call.Common().Args[0])
-					if !ok {
-						// add error, it has already acquired the lock
-						// TODO: update error message
-						name := shortCallName(call.Common())
-						j.Errorf(call, "Acquiring %s right after having locked already", name)
+					lockBlock := ins.Block()
+					// TODO: see detail in isLockToLock!!!
+					result := isLockToLock(call, lockBlock)
+					if result != nil {
+						rCall, _ := result.(*ssa.Call)
+						if isCallToLock(rCall.Common()) {
+							// TODO: optimizing the error message
+							po := result.Pos()
+							name := shortCallName(call.Common())
+							j.Errorf(call, "Acquiring the lock %s again at %v ", name, po)
+						}
 					}
-				} else if isCallToUnlock(call.Common()) {
-
-					lockSet.Remove(call.Common().Args[0])
-
-				} else {
-					continue
 				}
 			}
 		}

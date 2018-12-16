@@ -10,11 +10,9 @@ package staticcheck
 
 import (
 	"fmt"
-	"github.com/Tengfei1010/GCBDetector/staticcheck/checkerutil"
 	"go/ast"
 	"go/token"
 	"go/types"
-	//"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -466,7 +464,6 @@ type InstrInterface interface {
 	ssa.Instruction
 }
 
-
 func isLockToLock(lockCall *ssa.Call, currentBlock *ssa.BasicBlock) ssa.Instruction {
 
 	// TODO: current method is not suitable for following case.
@@ -508,19 +505,18 @@ func isLockToLock(lockCall *ssa.Call, currentBlock *ssa.BasicBlock) ssa.Instruct
 
 		if call.Common().Args[0] == lockCall.Common().Args[0] {
 
-			if util.InstrDominates(lockCall, call){
+			if util.InstrDominates(lockCall, call) {
 				return ins
 			}
 		}
 	}
 
-
 	for _, sBlock := range currentBlock.Dominees() {
-		
+
 		if sBlock == currentBlock {
 			continue
 		}
-		
+
 		if len(sBlock.Dominees()) > 0 {
 			return isLockToLock(lockCall, sBlock)
 		}
@@ -780,6 +776,7 @@ func (c *Checker) CheckUnlockAfterLock(j *lint.Job) {
 func (c *Checker) CheckDoubleLock(j *lint.Job) {
 
 	for _, ssafn := range j.Program.InitialFunctions {
+		fmt.Println(ssafn.Name())
 		for _, block := range ssafn.Blocks {
 			instrs := FilterDebug(block.Instrs)
 
@@ -823,9 +820,9 @@ func (c *Checker) CheckAnonRace(j *lint.Job) {
 			continue
 		}
 
-		blockReachability := checkerutil.MapReachableBlocks(ssafn)
+		blockReachability := util.MapReachableBlocks(ssafn)
 
-		if result, ok := checkerutil.HasAnonRace(ssafn.AnonFuncs, blockReachability); ok {
+		if result, ok := util.HasAnonRace(ssafn.AnonFuncs, blockReachability); ok {
 			fmt.Println(result)
 		}
 	}

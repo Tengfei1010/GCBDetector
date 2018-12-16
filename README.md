@@ -2,7 +2,7 @@
 Go Concurrency Bug Detector Based on Golang SSA
 
 ### How to install GCBDetector
-$ go get Tengfei1010/GCBDetector/...
+$ go get github.com/Tengfei1010/GCBDetector/...
 
 ### How to use it
 $ cd $GOROOT/bin

@@ -508,7 +508,7 @@ func isLockToLock(lockCall *ssa.Call, currentBlock *ssa.BasicBlock) ssa.Instruct
 
 		if call.Common().Args[0] == lockCall.Common().Args[0] {
 
-			if util.InstrDominas(lockCall, call){
+			if util.InstrDominates(lockCall, call){
 				return ins
 			}
 		}
@@ -796,6 +796,7 @@ func (c *Checker) CheckDoubleLock(j *lint.Job) {
 				}
 
 				if isCallToLock(call.Common()) {
+
 					lockBlock := ins.Block()
 					// TODO: see detail in isLockToLock!!!
 					result := isLockToLock(call, lockBlock)

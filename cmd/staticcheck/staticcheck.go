@@ -12,14 +12,15 @@ package main
 import (
 	"github.com/Tengfei1010/GCBDetector/lint/lintutil"
 	"github.com/Tengfei1010/GCBDetector/staticcheck"
+	"os"
 )
 
 func main() {
-	path := []string { "/home/kevin/go/src/github.com/Tengfei1010/GCBDetector/testdata/CheckDeferLock.go"}
+	//path := []string { "/home/kevin/go/src/github.com/Tengfei1010/GCBDetector/testdata/CheckDeferLock.go"}
 	fs := lintutil.FlagSet("staticcheck")
 	gen := fs.Bool("generated", false, "Check generated code")
-	//fs.Parse(os.Args[1:])
-	fs.Parse(path)
+	fs.Parse(os.Args[1:])
+	//fs.Parse(path)
 	c := staticcheck.NewChecker()
 	c.CheckGenerated = *gen
 	cfg := lintutil.CheckerConfig{

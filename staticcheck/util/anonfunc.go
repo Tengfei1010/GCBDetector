@@ -1,4 +1,4 @@
-package checkerutil
+package util
 
 import (
 	"fmt"

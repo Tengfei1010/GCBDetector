@@ -1,4 +1,4 @@
-package checkerutil
+package util
 
 import (
 	"github.com/Tengfei1010/GCBDetector/ssa"

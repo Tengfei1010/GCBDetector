@@ -10,9 +10,11 @@ package staticcheck
 
 import (
 	"fmt"
+	"github.com/Tengfei1010/GCBDetector/staticcheck/checkerutil"
 	"go/ast"
 	"go/token"
 	"go/types"
+	//"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -55,6 +57,7 @@ func (c *Checker) Funcs() map[string]lint.Func {
 		"SA2003": c.CheckDeferLock,
 		"SA2004": c.CheckUnlockAfterLock,
 		"SA2005": c.CheckDoubleLock,
+		"SA2006": c.CheckAnonRace,
 	}
 }
 
@@ -745,4 +748,21 @@ func (c *Checker) CheckDoubleLock(j *lint.Job) {
 			}
 		}
 	}
+}
+
+func (c *Checker) CheckAnonRace(j *lint.Job) {
+
+	for _, ssafn := range j.Program.InitialFunctions {
+
+		if strings.HasSuffix(ssafn.String(), ".init") {
+			continue
+		}
+
+		blockReachability := checkerutil.MapReachableBlocks(ssafn)
+
+		if result, ok := checkerutil.HasAnonRace(ssafn.AnonFuncs, blockReachability); ok {
+			fmt.Println(result)
+		}
+	}
+
 }

@@ -10,6 +10,7 @@ package staticcheck
 
 import (
 	"fmt"
+	"github.com/Tengfei1010/GCBDetector/callgraph/bbcallgraph"
 	"go/ast"
 	"go/token"
 	"go/types"
@@ -22,8 +23,8 @@ import (
 	"github.com/Tengfei1010/GCBDetector/lint"
 	. "github.com/Tengfei1010/GCBDetector/lint/lintdsl"
 	"github.com/Tengfei1010/GCBDetector/ssa"
-	"golang.org/x/tools/go/loader"
 	"github.com/Tengfei1010/GCBDetector/staticcheck/util"
+	"golang.org/x/tools/go/loader"
 )
 
 type runeSlice []rune
@@ -460,30 +461,54 @@ func isCallToUnlock(callCommon *ssa.CallCommon) bool {
 
 }
 
-type InstrInterface interface {
-	ssa.Instruction
+func getLockPrefix(lockCall *ssa.Call) string{
+	value := lockCall.Common().Args[0]
+	return value.String()
 }
 
-func isLockToLock(lockCall *ssa.Call, currentBlock *ssa.BasicBlock) ssa.Instruction {
+func collectLockInstrs(function *ssa.Function) map[string] []ssa.Instruction {
 
-	// TODO: current method is not suitable for following case.
-	/*
-		There is a double lock in function f2.
+	result := make(map[string] []ssa.Instruction)
 
-		func f1 () {
-			....
-			r.Lock()
+	for _, bb := range function.Blocks {
+
+		for _, instr := range bb.Instrs {
+
+			call, ok := instr.(*ssa.Call)
+
+			if !ok {
+				continue
+			}
+
+			if isCallToLock(call.Common()) {
+
+				lockValue := getLockPrefix(call)
+				fmt.Println(lockValue)
+				if arrs, ok := result[lockValue]; ok {
+					arrs = append(arrs, instr)
+					result[lockValue] = arrs
+
+				} else {
+					arrs := []ssa.Instruction {instr}
+					result[lockValue] = arrs
+				}
+			}
 		}
+	}
 
-		func f2() {
-			...
-			r.Lock()
-			f1()
-		}
+	return result
 
-	 */
+}
 
-	for _, ins := range currentBlock.Instrs {
+func isLockToLockInSameBlock (fLock *ssa.Call, sLock *ssa.Call) bool {
+
+	curBlock := fLock.Block()
+	
+	fInstrIndex := -1
+	sInstrIndex := -1
+	unlockIndex := -1
+
+	for index, ins := range curBlock.Instrs {
 
 		call, ok := ins.(*ssa.Call)
 
@@ -491,39 +516,24 @@ func isLockToLock(lockCall *ssa.Call, currentBlock *ssa.BasicBlock) ssa.Instruct
 			continue
 		}
 
-		if call == lockCall {
-			continue
+		if call == fLock {
+			fInstrIndex = index
 		}
 
-		if isCallToUnlock(call.Common()) && call.Common().Args[0] == lockCall.Common().Args[0] {
-			return nil
-		}
-
-		if !isCallToLock(call.Common()) {
-			continue
-		}
-
-		if call.Common().Args[0] == lockCall.Common().Args[0] {
-
-			if util.InstrDominates(lockCall, call) {
-				return ins
+		if isCallToUnlock(call.Common()) && getLockPrefix(call) == getLockPrefix(fLock) {
+			unlockIndex = index
+			if (fInstrIndex < unlockIndex && sInstrIndex == -1 && fInstrIndex != -1) ||
+				(sInstrIndex < unlockIndex && fInstrIndex == -1 && sInstrIndex != -1)  {
+				return false
 			}
 		}
-	}
-
-	for _, sBlock := range currentBlock.Dominees() {
-
-		if sBlock == currentBlock {
-			continue
-		}
-
-		if len(sBlock.Dominees()) > 0 {
-			return isLockToLock(lockCall, sBlock)
+		
+		if call == sLock {
+			sInstrIndex = index
 		}
 	}
-
-	return nil
-
+	
+	return true
 }
 
 func (c *Checker) CheckWaitgroupAdd(j *lint.Job) {
@@ -775,41 +785,99 @@ func (c *Checker) CheckUnlockAfterLock(j *lint.Job) {
 
 func (c *Checker) CheckDoubleLock(j *lint.Job) {
 
+
 	for _, ssafn := range j.Program.InitialFunctions {
-		fmt.Println(ssafn.Name())
-		for _, block := range ssafn.Blocks {
-			instrs := FilterDebug(block.Instrs)
 
-			if len(instrs) < 2 {
-				continue
-			}
+		lockResult := collectLockInstrs(ssafn)
+		// create basic block call graph
+		bg := bbcallgraph.BBCallGraph(ssafn)
 
-			for _, ins := range instrs[:len(instrs)-1] {
+		for lockKey, lockInstrs := range lockResult {
 
-				call, ok := ins.(*ssa.Call)
+			if len(lockInstrs) >= 2 {
 
-				if !ok {
-					continue
-				}
+				for i := 0; i < len(lockInstrs)-1; i++ {
 
-				if isCallToLock(call.Common()) {
+					fInstr, _ := lockInstrs[i].(*ssa.Call)
+					sInstr, _ := lockInstrs[i+1].(*ssa.Call)
 
-					lockBlock := ins.Block()
-					// TODO: see detail in isLockToLock!!!
-					result := isLockToLock(call, lockBlock)
-					if result != nil {
-						rCall, _ := result.(*ssa.Call)
-						if isCallToLock(rCall.Common()) {
-							// TODO: optimizing the error message
-							po := result.Pos()
-							name := shortCallName(call.Common())
-							j.Errorf(call, "Acquiring the lock %s again at %v ", name, po)
+					if fInstr.Block() == sInstr.Block() {
+						if isLockToLockInSameBlock(fInstr, sInstr) {
+							po := j.Program.DisplayPosition(sInstr.Pos())
+							name := shortCallName(fInstr.Common())
+							j.Errorf(fInstr, "Acquiring the lock %s again at %v ", name, po)
+						}
+					} else {
+							// not is same block, find a path
+							//	/*
+							//	func f() {
+							//		a : =0
+							//		r.Lock()
+							//	    a = 10
+							//		if i > 0 {
+							//			r2 = f2()
+							//	        if r2 > 10 {
+							//				r.Lock()
+							//				a = a - 4
+							//	            ......
+							//	        }
+							//		}
+							//	}
+							//	*/
+							fNode := bg.CreateBBNode(fInstr.Block())
+							sNode := bg.CreateBBNode(sInstr.Block())
+
+							// unlock is in fNode' block, we need not to search
+							isNeededSearch := true
+							for _, ins := range fNode.BB.Instrs {
+								call, ok := ins.(*ssa.Call)
+								if !ok {
+									continue
+								}
+								if isCallToUnlock(call.Common()) && getLockPrefix(call) == lockKey {
+									isNeededSearch = false
+								}
+							}
+
+							if isNeededSearch && bbcallgraph.LockPathSearch(
+								fNode, sNode, lockKey, func(node *bbcallgraph.BBNode) bool {
+
+								for _, ins := range node.BB.Instrs {
+									call, ok := ins.(*ssa.Call)
+									if !ok {
+										continue
+									}
+									if isCallToUnlock(call.Common()) && getLockPrefix(call) == lockKey {
+										return false
+									}
+								}
+								return true
+							}) != nil {
+								po := j.Program.DisplayPosition(sInstr.Pos())
+								name := shortCallName(fInstr.Common())
+								j.Errorf(fInstr, "Acquiring the lock %s again at %v ", name, po)
+							}
 						}
 					}
 				}
 			}
 		}
-	}
+
+		//	// TODO: current method is not suitable for following case.
+		//	/*
+		//		There is a double lock in function f2.
+		//
+		//		func f1 () {
+		//			....
+		//			r.Lock()
+		//		}
+		//
+		//		func f2() {
+		//			...
+		//			r.Lock()
+		//			f1()
+		//		}
+		//
 }
 
 func (c *Checker) CheckAnonRace(j *lint.Job) {

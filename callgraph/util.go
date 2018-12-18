@@ -85,6 +85,38 @@ func PathSearch(start *Node, isEnd func(*Node) bool) []*Edge {
 	return search(start)
 }
 
+// PathSearch finds an arbitrary path starting at node start and
+// ending at some node for which isEnd() returns true.  On success,
+// PathSearch returns the path as an ordered list of edges; on
+// failure, it returns nil.
+//
+func PathSearchIgnoreGoCall(start *Node, isEnd func(*Node) bool) []*Edge {
+	stack := make([]*Edge, 0, 32)
+	seen := make(map[*Node]bool)
+	var search func(n *Node) []*Edge
+	search = func(n *Node) []*Edge {
+		if !seen[n] {
+			seen[n] = true
+			if isEnd(n) {
+				return stack
+			}
+			for _, e := range n.Out {
+				_, ok := e.Site.(*ssa.Go)
+				if ok {
+					continue
+				}
+				stack = append(stack, e) // push
+				if found := search(e.Callee); found != nil {
+					return found
+				}
+				stack = stack[:len(stack)-1] // pop
+			}
+		}
+		return nil
+	}
+	return search(start)
+}
+
 // DeleteSyntheticNodes removes from call graph g all nodes for
 // synthetic functions (except g.Root and package initializers),
 // preserving the topology.  In effect, calls to synthetic wrappers

@@ -463,7 +463,7 @@ func isCallToUnlock(callCommon *ssa.CallCommon) bool {
 		return true
 	}
 
-	// TODO: maybe has F
+	// TODO: maybe has FN
 	callStr := strings.ToLower(callCommon.String())
 	if strings.Contains(callStr, ".unlock") ||
 		strings.Contains(callStr, ".runlock"){
@@ -832,35 +832,38 @@ func (c *Checker) _isDoubleLock(fInstr *ssa.Call, sInstr *ssa.Call, lockKey stri
 	fFunc := fInstr.Parent()
 	sFunc := sInstr.Parent()
 
-	if fFunc == sFunc {
-		// create basic block call graph
-		bg := bbcallgraph.BBCallGraph(fFunc)
+	isNotNeedFindPathSearch := false
 
-		if fInstr.Block() == sInstr.Block() {
-			if isLockToLockInSameBlock(fInstr, sInstr) {
-				return true
-			}
-		} else {
-			/* not is same block, find a path
-			func f() {
-				a : =0
-				r.Lock()
-				a = 10
-				if i > 0 {
-					r2 = f2()
-					if r2 > 10 {
-						r.Lock()
-						a = a - 4
-						......
-					}
-				}
-			}
-			*/
-			fNode := bg.CreateBBNode(fInstr.Block())
-			sNode := bg.CreateBBNode(sInstr.Block())
-			return findPath(fNode, sNode, lockKey)
+	// create basic block call graph
+	bg := bbcallgraph.BBCallGraph(fFunc)
+
+	if fInstr.Block() == sInstr.Block() {
+		if isLockToLockInSameBlock(fInstr, sInstr) {
+			isNotNeedFindPathSearch= true
 		}
 	} else {
+		/* not is same block, find a path
+		func f() {
+			a : =0
+			r.Lock()
+			a = 10
+			if i > 0 {
+				r2 = f2()
+				if r2 > 10 {
+					r.Lock()
+					a = a - 4
+					......
+				}
+			}
+		}
+		*/
+		fNode := bg.CreateBBNode(fInstr.Block())
+		sNode := bg.CreateBBNode(sInstr.Block())
+		isNotNeedFindPathSearch = findPath(fNode, sNode, lockKey)
+	}
+
+	if !isNotNeedFindPathSearch {
+
 		/*
 		func f1() {
 		  r.Lock()
@@ -877,13 +880,12 @@ func (c *Checker) _isDoubleLock(fInstr *ssa.Call, sInstr *ssa.Call, lockKey stri
 		 */
 
 		fFuncNode := c.funcDescs.CallGraph.CreateNode(fFunc)
-		// create basic block call graph
-		bg := bbcallgraph.BBCallGraph(fFunc)
 		fmt.Println(fFunc.Name() + "---->" + sFunc.Name())
+
 		pathResult := callgraph.PathSearchIgnoreGoCall(
 			fFuncNode, func(other *callgraph.Node) bool {
-			return other.Func == sFunc
-		})
+				return other.Func == sFunc
+			})
 
 		if pathResult != nil {
 			firstEdge := pathResult[0]
@@ -911,7 +913,6 @@ func (c *Checker) _isDoubleLock(fInstr *ssa.Call, sInstr *ssa.Call, lockKey stri
 			}
 		}
 	}
-
 	return false
 }
 
@@ -920,10 +921,6 @@ func (c *Checker) CheckDoubleLock(j *lint.Job) {
 	lockInstructions := make(map[string][]ssa.Instruction)
 
 	for _, ssafn := range j.Program.InitialFunctions {
-
-		if !(ssafn.Name() == "getAddrConn" || ssafn.Name() == "UpdateAddresses") {
-			continue
-		}
 
 		lockResultBB := collectLockInstrs(ssafn)
 
@@ -937,32 +934,28 @@ func (c *Checker) CheckDoubleLock(j *lint.Job) {
 
 		// length greater than 2 could be double lock, expect in a loop or recursive
 		// current we ignore those cases.
-		if len(lockInstrs) >= 2 {
-			for i := 0; i < len(lockInstrs)-1; i++ {
-				for t := i + 1; t < len(lockInstrs); t++ {
-					fInstr, _ := lockInstrs[i].(*ssa.Call)
-					sInstr, _ := lockInstrs[t].(*ssa.Call)
+		//if len(lockInstrs) >= 2 {
+		for i := 0; i < len(lockInstrs); i++ {
+			for t := i; t < len(lockInstrs); t++ {
+				fInstr, _ := lockInstrs[i].(*ssa.Call)
+				sInstr, _ := lockInstrs[t].(*ssa.Call)
 
-					if c._isDoubleLock(fInstr, sInstr, lockKey) {
-						po := j.Program.DisplayPosition(sInstr.Pos())
-						name := shortCallName(fInstr.Common())
-						j.Errorf(fInstr, "Acquiring the lock %s again at %v ", name, po)
+				if c._isDoubleLock(fInstr, sInstr, lockKey) {
+					po := j.Program.DisplayPosition(sInstr.Pos())
+					name := shortCallName(fInstr.Common())
+					j.Errorf(fInstr, "Acquiring the lock %s again at %v ", name, po)
 
-					}
+				}
 
-					if c._isDoubleLock(sInstr, fInstr, lockKey) {
-						po := j.Program.DisplayPosition(fInstr.Pos())
-						name := shortCallName(sInstr.Common())
-						j.Errorf(sInstr, "Acquiring the lock %s again at %v ", name, po)
-					}
+				if c._isDoubleLock(sInstr, fInstr, lockKey) {
+					po := j.Program.DisplayPosition(fInstr.Pos())
+					name := shortCallName(sInstr.Common())
+					j.Errorf(sInstr, "Acquiring the lock %s again at %v ", name, po)
 				}
 			}
 		}
+		//}
 
-		// TODO: may be in a loop!!!
-		if len(lockInstrs) == 1 {
-
-		}
 	}
 }
 

@@ -450,7 +450,7 @@ func isCallToLock(callCommon *ssa.CallCommon) bool {
 	// TODO: maybe has FN
 	callStr := strings.ToLower(callCommon.String())
 	if strings.Contains(callStr, ".lock") ||
-		strings.Contains(callStr, ".rlock"){
+		strings.Contains(callStr, ".rlock") {
 		return true
 	}
 	return false
@@ -466,7 +466,7 @@ func isCallToUnlock(callCommon *ssa.CallCommon) bool {
 	// TODO: maybe has FN
 	callStr := strings.ToLower(callCommon.String())
 	if strings.Contains(callStr, ".unlock") ||
-		strings.Contains(callStr, ".runlock"){
+		strings.Contains(callStr, ".runlock") {
 		return true
 	}
 
@@ -839,8 +839,16 @@ func (c *Checker) _isDoubleLock(fInstr *ssa.Call, sInstr *ssa.Call, lockKey stri
 
 	if fInstr.Block() == sInstr.Block() {
 		if isLockToLockInSameBlock(fInstr, sInstr) {
-			isNotNeedFindPathSearch= true
+			isNotNeedFindPathSearch = true
 		}
+
+		// maybe in a loop
+		if !isNotNeedFindPathSearch && c.isInLoop(fInstr.Block()) {
+			fNode := bg.CreateBBNode(fInstr.Block())
+			sNode := bg.CreateBBNode(sInstr.Block())
+			isNotNeedFindPathSearch = findPath(fNode, sNode, lockKey)
+		}
+
 	} else {
 		/* not is same block, find a path
 		func f() {
@@ -887,7 +895,8 @@ func (c *Checker) _isDoubleLock(fInstr *ssa.Call, sInstr *ssa.Call, lockKey stri
 				return other.Func == sFunc
 			})
 
-		if pathResult != nil {
+		// Careful pathResult != nil is not equal len(pathResult) > 0
+		if len(pathResult) > 0 {
 			firstEdge := pathResult[0]
 			callInstruction := firstEdge.Site
 			sInstr, ok := callInstruction.(*ssa.Call)
@@ -913,7 +922,7 @@ func (c *Checker) _isDoubleLock(fInstr *ssa.Call, sInstr *ssa.Call, lockKey stri
 			}
 		}
 	}
-	return false
+	return isNotNeedFindPathSearch
 }
 
 func (c *Checker) CheckDoubleLock(j *lint.Job) {
@@ -947,7 +956,7 @@ func (c *Checker) CheckDoubleLock(j *lint.Job) {
 
 				}
 
-				if c._isDoubleLock(sInstr, fInstr, lockKey) {
+				if fInstr != sInstr && c._isDoubleLock(sInstr, fInstr, lockKey) {
 					po := j.Program.DisplayPosition(fInstr.Pos())
 					name := shortCallName(sInstr.Common())
 					j.Errorf(sInstr, "Acquiring the lock %s again at %v ", name, po)

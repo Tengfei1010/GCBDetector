@@ -50,13 +50,13 @@ func (*Checker) Prefix() string { return "SA" }
 func (c *Checker) Funcs() map[string]lint.Func {
 	return map[string]lint.Func{
 
-		"SA2000": c.CheckWaitgroupAdd,
-		"SA2001": c.CheckEmptyCriticalSection,
-		"SA2002": c.CheckConcurrentTesting,
-		"SA2003": c.CheckDeferLock,
-		"SA2004": c.CheckUnlockAfterLock,
+		//"SA2000": c.CheckWaitgroupAdd,
+		//"SA2001": c.CheckEmptyCriticalSection,
+		//"SA2002": c.CheckConcurrentTesting,
+		//"SA2003": c.CheckDeferLock,
+		//"SA2004": c.CheckUnlockAfterLock,
 		"SA2005": c.CheckDoubleLock,
-		"SA2006": c.CheckAnonRace,
+		//"SA2006": c.CheckAnonRace,
 	}
 }
 
@@ -476,6 +476,15 @@ func isCallToUnlock(callCommon *ssa.CallCommon) bool {
 
 func getLockPrefix(lockCall *ssa.Call) string {
 	if len(lockCall.Common().Args) < 1 {
+		lockStr := lockCall.Common().String()
+		if strings.Contains(lockStr, "invoke") {
+			// invoke t65.Lock()return t65
+			start := strings.Index(lockStr, " ")
+			end := strings.Index(lockStr, ".")
+			if start != -1 && end != -1 {
+				return lockStr[start:end]
+			}
+		}
 		return lockCall.Common().String()
 	}
 
@@ -807,22 +816,31 @@ func findPath(fNode *bbcallgraph.BBNode, sNode *bbcallgraph.BBNode, lockKey stri
 		}
 	}
 
-	if isNeededSearch && bbcallgraph.LockPathSearch(
-		fNode, sNode, lockKey, func(node *bbcallgraph.BBNode) bool {
+	if isNeededSearch {
+		result := bbcallgraph.LockPathSearch(
+			fNode, sNode, lockKey, func(node *bbcallgraph.BBNode) bool {
 
-			for _, ins := range node.BB.Instrs {
-				call, ok := ins.(*ssa.Call)
-				if !ok {
-					continue
+				for _, ins := range node.BB.Instrs {
+					call, ok := ins.(*ssa.Call)
+					if !ok {
+						continue
+					}
+
+					if isCallToUnlock(call.Common()) && getLockPrefix(call) == lockKey {
+						return false
+					}
+
+					if isCallToLock(call.Common()) && getLockPrefix(call) == lockKey {
+						break
+					}
 				}
-				if isCallToUnlock(call.Common()) && getLockPrefix(call) == lockKey {
-					return false
-				}
-			}
+				return true
+
+			})
+
+		if len(result) > 0 {
 			return true
-
-		}) != nil {
-		return true
+		}
 	}
 
 	return false
@@ -915,9 +933,9 @@ func (c *Checker) _isDoubleLock(fInstr *ssa.Call, sInstr *ssa.Call, lockKey stri
 
 				finded := findPath(fNode, sNode, lockKey)
 
-				if finded {
-					fmt.Println(pathResult)
-				}
+				//if finded {
+				//	fmt.Println(pathResult)
+				//}
 				return finded
 			}
 		}
@@ -930,6 +948,10 @@ func (c *Checker) CheckDoubleLock(j *lint.Job) {
 	lockInstructions := make(map[string][]ssa.Instruction)
 
 	for _, ssafn := range j.Program.InitialFunctions {
+
+		//if ssafn.Name() != "TestScheduleCompaction" {
+		//	continue
+		//}
 
 		lockResultBB := collectLockInstrs(ssafn)
 
@@ -952,14 +974,14 @@ func (c *Checker) CheckDoubleLock(j *lint.Job) {
 				if c._isDoubleLock(fInstr, sInstr, lockKey) {
 					po := j.Program.DisplayPosition(sInstr.Pos())
 					name := shortCallName(fInstr.Common())
-					j.Errorf(fInstr, "Acquiring the lock %s again at %v ", name, po)
+					j.Errorf(fInstr, "Acquiring the %s again at %v ", name, po)
 
 				}
 
 				if fInstr != sInstr && c._isDoubleLock(sInstr, fInstr, lockKey) {
 					po := j.Program.DisplayPosition(fInstr.Pos())
 					name := shortCallName(sInstr.Common())
-					j.Errorf(sInstr, "Acquiring the lock %s again at %v ", name, po)
+					j.Errorf(sInstr, "Acquiring the %s again at %v ", name, po)
 				}
 			}
 		}

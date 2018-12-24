@@ -451,6 +451,12 @@ func isCallToLock(callCommon *ssa.CallCommon) bool {
 	callStr := strings.ToLower(callCommon.String())
 	if strings.Contains(callStr, ".lock") ||
 		strings.Contains(callStr, ".rlock") {
+
+		// Here we ignore the function which has a parameter
+		if len(callCommon.Args) > 1 {
+			return false
+		}
+
 		return true
 	}
 	return false
@@ -906,7 +912,7 @@ func (c *Checker) _isDoubleLock(fInstr *ssa.Call, sInstr *ssa.Call, lockKey stri
 		 */
 
 		fFuncNode := c.funcDescs.CallGraph.CreateNode(fFunc)
-		fmt.Println(fFunc.Name() + "---->" + sFunc.Name())
+		//fmt.Println(fFunc.Name() + "---->" + sFunc.Name())
 
 		pathResult := callgraph.PathSearchIgnoreGoCall(
 			fFuncNode, func(other *callgraph.Node) bool {
@@ -949,7 +955,7 @@ func (c *Checker) CheckDoubleLock(j *lint.Job) {
 
 	for _, ssafn := range j.Program.InitialFunctions {
 
-		//if ssafn.Name() != "TestScheduleCompaction" {
+		//if ssafn.Name() != "LockWriteOps" {
 		//	continue
 		//}
 

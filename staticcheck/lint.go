@@ -970,8 +970,6 @@ func (c *Checker) CheckDoubleLock(j *lint.Job) {
 
 	for lockKey, lockInstrs := range lockInstructions {
 
-		// length greater than 2 could be double lock, expect in a loop or recursive
-		// current we ignore those cases.
 		for i := 0; i < len(lockInstrs); i++ {
 			for t := i; t < len(lockInstrs); t++ {
 				fInstr, _ := lockInstrs[i].(*ssa.Call)

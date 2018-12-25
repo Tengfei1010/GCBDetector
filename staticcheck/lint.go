@@ -50,13 +50,14 @@ func (*Checker) Prefix() string { return "SA" }
 func (c *Checker) Funcs() map[string]lint.Func {
 	return map[string]lint.Func{
 
-		//"SA2000": c.CheckWaitgroupAdd,
-		//"SA2001": c.CheckEmptyCriticalSection,
-		//"SA2002": c.CheckConcurrentTesting,
-		//"SA2003": c.CheckDeferLock,
-		//"SA2004": c.CheckUnlockAfterLock,
+		"SA2000": c.CheckWaitgroupAdd,
+		"SA2001": c.CheckEmptyCriticalSection,
+		"SA2002": c.CheckConcurrentTesting,
+		"SA2003": c.CheckDeferLock,
+		"SA2004": c.CheckUnlockAfterLock,
 		"SA2005": c.CheckDoubleLock,
-		//"SA2006": c.CheckAnonRace,
+		"SA2006": c.CheckAnonRace,
+		"SA2007": c.CheckWaitgroupBlocking,
 	}
 }
 
@@ -971,7 +972,6 @@ func (c *Checker) CheckDoubleLock(j *lint.Job) {
 
 		// length greater than 2 could be double lock, expect in a loop or recursive
 		// current we ignore those cases.
-		//if len(lockInstrs) >= 2 {
 		for i := 0; i < len(lockInstrs); i++ {
 			for t := i; t < len(lockInstrs); t++ {
 				fInstr, _ := lockInstrs[i].(*ssa.Call)
@@ -991,8 +991,6 @@ func (c *Checker) CheckDoubleLock(j *lint.Job) {
 				}
 			}
 		}
-		//}
-
 	}
 }
 
@@ -1011,4 +1009,84 @@ func (c *Checker) CheckAnonRace(j *lint.Job) {
 		}
 	}
 
+}
+
+func (c *Checker) CheckWaitgroupBlocking(j *lint.Job) {
+
+	for _, ssafn := range j.Program.InitialFunctions {
+
+		// for loop in a func and create goroutines in the loop
+		loopSets := c.funcDescs.Get(ssafn).Loops
+
+		for _, loop := range loopSets {
+
+			isCallDoneInGoroutine := false
+			isCallWait := false
+
+			for bb := range loop {
+
+				for _, ins := range bb.Instrs {
+
+					// new goroutine
+					gostmt, ok := ins.(*ssa.Go)
+
+					if ok {
+
+						var fn *ssa.Function
+						switch val := gostmt.Call.Value.(type) {
+						case *ssa.Function:
+							fn = val
+						case *ssa.MakeClosure:
+							fn = val.Fn.(*ssa.Function)
+						default:
+							continue
+						}
+						if fn.Blocks == nil {
+							continue
+						}
+
+						for _, block := range fn.Blocks {
+							for _, ins := range block.Instrs {
+								call, ok := ins.(*ssa.Call)
+								if !ok {
+									continue
+								}
+
+								callStr := strings.ToLower(call.Common().String())
+								if strings.Contains(callStr, ".done(") {
+									isCallDoneInGoroutine = true
+								}
+							}
+						}
+					}
+
+					// call Wait()
+					call, ok := ins.(*ssa.Call)
+					if ok {
+						callStr := strings.ToLower(call.Common().String())
+						if strings.Contains(callStr, ".wait(") {
+							isCallWait = true
+						}
+					}
+				}
+			}
+
+			if isCallWait && isCallDoneInGoroutine {
+
+				for bb, ok := range loop {
+
+					if ok {
+
+						for _, ins := range bb.Instrs {
+							if ins.Pos() > 0 {
+								j.Errorf(ins, "There is a potential blocking bug," +
+									"which caused by misusing Wait() and Done()!")
+								break
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 }

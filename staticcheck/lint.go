@@ -50,14 +50,15 @@ func (*Checker) Prefix() string { return "SA" }
 func (c *Checker) Funcs() map[string]lint.Func {
 	return map[string]lint.Func{
 
-		"SA2000": c.CheckWaitgroupAdd,
-		"SA2001": c.CheckEmptyCriticalSection,
-		"SA2002": c.CheckConcurrentTesting,
-		"SA2003": c.CheckDeferLock,
-		"SA2004": c.CheckUnlockAfterLock,
-		"SA2005": c.CheckDoubleLock,
-		"SA2006": c.CheckAnonRace,
-		"SA2007": c.CheckWaitgroupBlocking,
+		//"SA2000": c.CheckWaitgroupAdd,
+		//"SA2001": c.CheckEmptyCriticalSection,
+		//"SA2002": c.CheckConcurrentTesting,
+		//"SA2003": c.CheckDeferLock,
+		//"SA2004": c.CheckUnlockAfterLock,
+		//"SA2005": c.CheckDoubleLock,
+		//"SA2006": c.CheckAnonRace,
+		//"SA2007": c.CheckWaitgroupBlocking,
+		"SA2008": c.CheckPrimitiveUsage,
 	}
 }
 
@@ -976,9 +977,10 @@ func (c *Checker) CheckDoubleLock(j *lint.Job) {
 				sInstr, _ := lockInstrs[t].(*ssa.Call)
 
 				if c._isDoubleLock(fInstr, sInstr, lockKey) {
+					po1 := j.Program.DisplayPosition(fInstr.Pos())
 					po := j.Program.DisplayPosition(sInstr.Pos())
 					name := shortCallName(fInstr.Common())
-					j.Errorf(fInstr, "Acquiring the %s again at %v ", name, po)
+					j.Errorf(fInstr, "Acquiring the %s again at %v, %v", name, po, po1)
 
 				}
 
@@ -1077,7 +1079,7 @@ func (c *Checker) CheckWaitgroupBlocking(j *lint.Job) {
 
 						for _, ins := range bb.Instrs {
 							if ins.Pos() > 0 {
-								j.Errorf(ins, "There is a potential blocking bug," +
+								j.Errorf(ins, "There is a potential blocking bug,"+
 									"which caused by misusing Wait() and Done()!")
 								break
 							}
@@ -1087,4 +1089,153 @@ func (c *Checker) CheckWaitgroupBlocking(j *lint.Job) {
 			}
 		}
 	}
+}
+
+func _CallName(call *ssa.CallCommon) string {
+
+	if call.IsInvoke() {
+		return call.String()
+	}
+
+	switch v := call.Value.(type) {
+	case *ssa.Function:
+		fn, ok := v.Object().(*types.Func)
+		if !ok {
+			return ""
+		}
+		return fn.FullName()
+	case *ssa.Builtin:
+		return v.Name()
+	}
+	return ""
+}
+
+func ignoreFunc(j *lint.Job, f *ssa.Function) bool {
+
+	for _, bb := range f.Blocks {
+
+		for _, ins := range bb.Instrs {
+			if ins.Pos() > 0 {
+				po := j.Program.DisplayPosition(ins.Pos()).String()
+
+				if strings.Contains(po, "_test.go") {
+					return true
+				} else {
+					return false
+				}
+			}
+		}
+	}
+	return false
+}
+
+func (c *Checker) CheckPrimitiveUsage(j *lint.Job) {
+	isMutex := 0
+	isCond := 0
+	isPool := 0
+	isWaitgroup := 0
+	isAtomic := 0
+	isOnce := 0
+	isChannel := 0
+
+	for _, ssafn := range j.Program.InitialFunctions {
+
+		// ignore test file
+		if ignoreFunc(j, ssafn) {
+			continue
+		}
+
+		for _, bb := range ssafn.Blocks {
+
+			instrs := FilterDebug(bb.Instrs)
+
+			for _, ins := range instrs {
+
+				// Send type
+				// send value to channel
+				_, ok := ins.(*ssa.Send)
+				if ok {
+					isChannel += 1
+					//fmt.Println(ins)
+					continue
+				}
+
+				// UnOp type
+				unop, ok := ins.(*ssa.UnOp)
+				if ok {
+					if unop.Op == token.ARROW {
+						isChannel += 1
+						//fmt.Println(ins)
+						continue
+					}
+				}
+
+				// channel in select
+				selector, ok := ins.(*ssa.Select)
+				if ok {
+					// if each case in select is related to a channel
+					for _, state := range selector.States {
+						if state.Chan != nil {
+							isChannel += 1
+						}
+					}
+					continue
+				}
+
+				// call
+				var call *ssa.CallCommon
+
+				call_, ok := ins.(*ssa.Call)
+
+				if ok {
+					call = call_.Common()
+				}
+
+				deferIns, ok := ins.(*ssa.Defer)
+				if ok {
+					call = deferIns.Common()
+				}
+
+				if call != nil {
+					callName := _CallName(call)
+					if callName == "(*sync.Mutex).Lock" || callName == "(*sync.Mutex).Unlock" ||
+						callName == "(*sync.RWMutex).Lock" || callName == "(*sync.RWMutex).Unlock" ||
+						callName == "(*sync.RWMutex).RLock" || callName == "(*sync.RWMutex).RUnlock" {
+						isMutex += 1
+						continue
+					}
+
+					if callName == "(*sync.WaitGroup).Add" || callName == "(*sync.WaitGroup).Done" ||
+						callName == "(*sync.WaitGroup).Wait" {
+						isWaitgroup += 1
+						continue
+					}
+
+					if callName == "(*sync.Once).Do" {
+						isOnce += 1
+						continue
+					}
+
+					if callName == "(*sync.Cond).Broadcast" || callName == "(*sync.Cond).Signal" ||
+						callName == "(*sync.Cond).Wait" {
+						isCond += 1
+						continue
+					}
+
+					if callName == "(*sync.Pool).Get" || callName == "(*sync.Pool).Put" {
+						isPool += 1
+						continue
+					}
+
+					if strings.Contains(callName, "atomic") {
+						isAtomic += 1
+						continue
+					}
+				}
+			}
+		}
+	}
+
+	fmt.Printf("Mutex: %d, Cond %d, Pool %d, Once %d, atomic %d, Waitgroup %d, Channel %d\n",
+		isMutex, isCond, isPool, isOnce, isAtomic, isWaitgroup, isChannel)
 }

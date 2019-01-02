@@ -49,7 +49,6 @@ func (*Checker) Prefix() string { return "SA" }
 
 func (c *Checker) Funcs() map[string]lint.Func {
 	return map[string]lint.Func{
-
 		//"SA2000": c.CheckWaitgroupAdd,
 		//"SA2001": c.CheckEmptyCriticalSection,
 		//"SA2002": c.CheckConcurrentTesting,
@@ -1131,6 +1130,7 @@ func ignoreFunc(j *lint.Job, f *ssa.Function) bool {
 
 func (c *Checker) CheckPrimitiveUsage(j *lint.Job) {
 	isMutex := 0
+	isRWMutex := 0
 	isCond := 0
 	isPool := 0
 	isWaitgroup := 0
@@ -1198,10 +1198,14 @@ func (c *Checker) CheckPrimitiveUsage(j *lint.Job) {
 
 				if call != nil {
 					callName := _CallName(call)
-					if callName == "(*sync.Mutex).Lock" || callName == "(*sync.Mutex).Unlock" ||
-						callName == "(*sync.RWMutex).Lock" || callName == "(*sync.RWMutex).Unlock" ||
-						callName == "(*sync.RWMutex).RLock" || callName == "(*sync.RWMutex).RUnlock" {
+					if callName == "(*sync.Mutex).Lock" || callName == "(*sync.Mutex).Unlock" {
 						isMutex += 1
+						continue
+					}
+
+					if callName == "(*sync.RWMutex).Lock" || callName == "(*sync.RWMutex).Unlock" ||
+						callName == "(*sync.RWMutex).RLock" || callName == "(*sync.RWMutex).RUnlock" {
+						isRWMutex += 1
 						continue
 					}
 
@@ -1236,6 +1240,6 @@ func (c *Checker) CheckPrimitiveUsage(j *lint.Job) {
 		}
 	}
 
-	fmt.Printf("Mutex: %d, Cond %d, Pool %d, Once %d, atomic %d, Waitgroup %d, Channel %d\n",
-		isMutex, isCond, isPool, isOnce, isAtomic, isWaitgroup, isChannel)
+	fmt.Printf("Mutex: %d, RWMutex %d,Cond %d, Pool %d, Once %d, atomic %d, Waitgroup %d, Channel %d\n",
+		isMutex, isRWMutex, isCond, isPool, isOnce, isAtomic, isWaitgroup, isChannel)
 }

@@ -49,13 +49,13 @@ func (*Checker) Prefix() string { return "SA" }
 
 func (c *Checker) Funcs() map[string]lint.Func {
 	return map[string]lint.Func{
-		//"SA2000": c.CheckWaitgroupAdd,
-		//"SA2001": c.CheckEmptyCriticalSection,
-		//"SA2002": c.CheckConcurrentTesting,
-		//"SA2003": c.CheckDeferLock,
-		//"SA2004": c.CheckUnlockAfterLock,
-		//"SA2005": c.CheckDoubleLock,
-		//"SA2006": c.CheckAnonRace,
+		"SA2000": c.CheckWaitgroupAdd,
+		"SA2001": c.CheckEmptyCriticalSection,
+		"SA2002": c.CheckConcurrentTesting,
+		"SA2003": c.CheckDeferLock,
+		"SA2004": c.CheckUnlockAfterLock,
+		"SA2005": c.CheckDoubleLock,
+		"SA2006": c.CheckAnonRace,
 		//"SA2007": c.CheckWaitgroupBlocking,
 		"SA2008": c.CheckPrimitiveUsage,
 	}
@@ -450,8 +450,8 @@ func isCallToLock(callCommon *ssa.CallCommon) bool {
 
 	// TODO: maybe has FN
 	callStr := strings.ToLower(callCommon.String())
-	if strings.Contains(callStr, ".lock") ||
-		strings.Contains(callStr, ".rlock") {
+	if strings.Contains(callStr, ".lock(") ||
+		strings.Contains(callStr, ".rlock(") {
 
 		// Here we ignore the function which has a parameter
 		if len(callCommon.Args) > 1 {
@@ -513,6 +513,7 @@ func collectLockInstrs(function *ssa.Function) map[string][]ssa.Instruction {
 			}
 
 			if isCallToLock(call.Common()) {
+				fmt.Println(call.Common())
 				lockValue := getLockPrefix(call)
 				result[lockValue] = append(result[lockValue], instr)
 			}
@@ -810,6 +811,31 @@ func (c *Checker) CheckUnlockAfterLock(j *lint.Job) {
 	}
 }
 
+func isUnlockBeforeLock(sNode *bbcallgraph.BBNode, lockKey string) bool {
+	lockIndex := -1
+	unLockIndex := -1
+
+	for index, ins := range sNode.BB.Instrs {
+		call, ok := ins.(*ssa.Call)
+		if !ok {
+			continue
+		}
+		if isCallToUnlock(call.Common()) && getLockPrefix(call) == lockKey {
+			unLockIndex = index
+		}
+
+		if isCallToLock(call.Common()) && getLockPrefix(call) == lockKey {
+			lockIndex = index
+		}
+	}
+
+	if unLockIndex < lockIndex {
+		return true
+	}
+
+	return false
+}
+
 func findPath(fNode *bbcallgraph.BBNode, sNode *bbcallgraph.BBNode, lockKey string) bool {
 	// unlock is in fNode' block, we need not to search
 	isNeededSearch := true
@@ -821,6 +847,29 @@ func findPath(fNode *bbcallgraph.BBNode, sNode *bbcallgraph.BBNode, lockKey stri
 		if isCallToUnlock(call.Common()) && getLockPrefix(call) == lockKey {
 			isNeededSearch = false
 		}
+	}
+
+	// unlock is before second lock, we need not to search
+	/*
+	   func f1 () {
+		 r.Lock()
+	     ....
+	     f2()
+	     ....
+	   }
+
+
+	   func f2() {
+		  ....
+		  r.Unlock()
+	      ....
+	      r.lock()
+		  ....
+	   }
+	 */
+
+	if isUnlockBeforeLock(sNode, lockKey) {
+		isNeededSearch = false
 	}
 
 	if isNeededSearch {
@@ -854,6 +903,14 @@ func findPath(fNode *bbcallgraph.BBNode, sNode *bbcallgraph.BBNode, lockKey stri
 }
 
 func (c *Checker) _isDoubleLock(fInstr *ssa.Call, sInstr *ssa.Call, lockKey string) bool {
+
+	// TODO: right?
+	fName := shortCallName(fInstr.Common())
+	sName := shortCallName(sInstr.Common())
+	if fName != sName {
+		return false
+	}
+
 	fFunc := fInstr.Parent()
 	sFunc := sInstr.Parent()
 
@@ -874,7 +931,8 @@ func (c *Checker) _isDoubleLock(fInstr *ssa.Call, sInstr *ssa.Call, lockKey stri
 			isNotNeedFindPathSearch = findPath(fNode, sNode, lockKey)
 		}
 
-	} else {
+	} else if fFunc == sFunc {
+		// in the same function
 		/* not is same block, find a path
 		func f() {
 			a : =0
@@ -906,7 +964,7 @@ func (c *Checker) _isDoubleLock(fInstr *ssa.Call, sInstr *ssa.Call, lockKey stri
 		}
 
 		func f2() {
-		  ......
+		  ......    # no unlock
 		  r.Lock()
 		  ......
 		}
@@ -922,6 +980,14 @@ func (c *Checker) _isDoubleLock(fInstr *ssa.Call, sInstr *ssa.Call, lockKey stri
 
 		// Careful pathResult != nil is not equal len(pathResult) > 0
 		if len(pathResult) > 0 {
+
+			// TODO: optimize it!!!
+			sNode := bg.CreateBBNode(sInstr.Block())
+			if isUnlockBeforeLock(sNode, lockKey) {
+				// if there is an unlock before second lock, we should ignore it?
+				return false
+			}
+
 			firstEdge := pathResult[0]
 			callInstruction := firstEdge.Site
 			sInstr, ok := callInstruction.(*ssa.Call)
@@ -929,6 +995,7 @@ func (c *Checker) _isDoubleLock(fInstr *ssa.Call, sInstr *ssa.Call, lockKey stri
 				return false
 			}
 			// no unlock from lockInstruction to callInstruction
+			// no unlock before second locking, see line#977
 			if fInstr.Block() == sInstr.Block() {
 				if isLockToLockInSameBlock(fInstr, sInstr) {
 					return true
@@ -956,7 +1023,7 @@ func (c *Checker) CheckDoubleLock(j *lint.Job) {
 
 	for _, ssafn := range j.Program.InitialFunctions {
 
-		//if ssafn.Name() != "LockWriteOps" {
+		//if !(ssafn.Name() == "checkGrowBaseDeviceFS" || ssafn.Name() == "removeDevice") {
 		//	continue
 		//}
 
@@ -971,19 +1038,22 @@ func (c *Checker) CheckDoubleLock(j *lint.Job) {
 	for lockKey, lockInstrs := range lockInstructions {
 
 		for i := 0; i < len(lockInstrs); i++ {
+
 			for t := i; t < len(lockInstrs); t++ {
+
 				fInstr, _ := lockInstrs[i].(*ssa.Call)
 				sInstr, _ := lockInstrs[t].(*ssa.Call)
 
 				if c._isDoubleLock(fInstr, sInstr, lockKey) {
+
 					po1 := j.Program.DisplayPosition(fInstr.Pos())
 					po := j.Program.DisplayPosition(sInstr.Pos())
 					name := shortCallName(fInstr.Common())
 					j.Errorf(fInstr, "Acquiring the %s again at %v, %v", name, po, po1)
-
 				}
 
 				if fInstr != sInstr && c._isDoubleLock(sInstr, fInstr, lockKey) {
+
 					po := j.Program.DisplayPosition(fInstr.Pos())
 					name := shortCallName(sInstr.Common())
 					j.Errorf(sInstr, "Acquiring the %s again at %v ", name, po)
